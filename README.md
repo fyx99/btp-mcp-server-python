@@ -1,19 +1,34 @@
-# btp-mcp-server-python
-Sample implementation of a MCP server on BTP in Python
+# Building and securing MCP servers in Python on BTP
 
+MCP (Model Context Protocol) is the standard for tool access in AI agents. As SAP developers build extensions and integrations on SAP BTP, creating MCP servers has become equally relevant to expose business functionalities to AI agents. Whether you're extending Joule Studio or building custom AI solutions, MCP servers provide a standardized way to make your BTP services AI-accessible. In this tutorial, I'll show you how to build a production-ready MCP server on SAP Cloud Foundry using Python.
 
-MCP is the new standard for tool access for AI Agents. Developers in the SAP sphere build extensions and integrations on SAP BTP and nowadays building MCP servers is similarly relevant to expose functionalities to an Agent. In this blog post I am sharing a little sample MCP server written in Python to expose some functionality towards an agent. 
+![Architecture Overview](images/btp-mcp-server-python-architecture-l.drawio.png)
 
-Drawio showing scenario
+## What We'll Build
 
-For the scenario we will build on top of SAP Cloud Foundry - a very flexible and low cost runtime option we have on BTP. There is certainly the possibility to build this on Kyma as well.
-In this example I will build a research tool powered by the Perplexity API exposed on Generative AI Hub - because I want my Joule Studio based agents being able to query real-time data from the web. To secure the access to the MCP - I am using Cloud Identity Services - Identity Authentication (IAS) to implement a authentication check.
+We'll create three progressively complex MCP servers:
+1. **Simple Math Server** - Understanding the basics
+2. **Research Server** - Integrating Perplexity AI via Generative AI Hub
+3. **Secured Research Server** - Adding IAS authentication
 
-Note: You might as well wonder why not using the existing MCP directly from Perplexity? a) it's a nice tutorial exercise to build a Python wrapper - and b) the Generative AI Hub does expose the API - but not the API key. The MCP server directly from Perplexity basically requires me to hand in a key to make the requests on my behalf directly against their native API. This is not a scenario the Generative AI Hub supports - because we always need to proxy via that Generative AI Hub API with the Generative AI Hub credentials.
+All running on SAP Cloud Foundry, one of the most flexible and cost-effective runtime options on BTP.
 
+## Prerequisites
 
-Let's directly have a look at how the code can look like for such a super simple example: In this case we utilize the popular fast_mcp library for the basic support of MCP's protocol specifications. This is indeed helpful and can get us started super easily. For the example we just expose a single tool with the decorator mcp.tool in which we execute any function.
+Before starting, ensure you have:
+- SAP BTP account with Cloud Foundry environment
+- Cloud Foundry CLI installed and configured
+- Python 3.9+ installed locally
+- SAP Generative AI Hub access with service key (for Perplexity example)
+- SAP Cloud Identity Services (IAS) tenant with admin access (for authentication example)
 
+## Example 1: Simple MCP Server
+
+Let's start with the basics. We'll use the `fastmcp` library which handles MCP's protocol specifications elegantly.
+
+**File: `mcp_simple/server.py`**
+
+```python
 from starlette.responses import JSONResponse
 from fastmcp import FastMCP
 import os
@@ -37,45 +52,58 @@ def add(a: float, b: float) -> float:
     return a + b
 
 
-@mcp.custom_route("/health", methods=["GET"])
-async def health_check(request):
-    return JSONResponse({"status": "healthy", "service": "mcp-server"})
-
-
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+```
 
-Now for BTP specific we need to do a few modifications. To ensure the fast_mcp server is running well and also registered as a healthy application - we need to run it on the specific Cloud Foundry provided port - that is accessible via the environment variable PORT. In addition we specify the "transport". In my case I want to use the HTTP transport.
-To ensure the server is recongnized as a healty application we provide the health check health check http endpoint.
+**Key BTP Adaptations:**
+- **PORT environment variable**: Cloud Foundry assigns a dynamic port via the `PORT` environment variable — we must use it
+- **HTTP transport**: We use HTTP transport (not stdio) to make the MCP server accessible via network
 
-The mainfest for this MCP sample looks like this
+**File: `mcp_simple/manifest.yml`**
 
+```yaml
 ---
 applications:
-- name: research-mcp-server-simple
+- name: simple-mcp-server
   memory: 1024M
-  disk_quota: 4024M
+  disk_quota: 1024M
   buildpack: python_buildpack
   command: python server.py
+```
 
-So pretty straigt forward.
+**Deploy to Cloud Foundry:**
 
-If we want to enable our service to provide a tool for perplexity - we can do so by modifying it the following way:
+```bash
+cd mcp_simple
+cf push
+```
 
-First we add the file perplexity.py to invoke the Generative AI Hub:
+That's it! You now have a working MCP server on BTP.
 
-"""
-Perplexity Research Tool via SAP Gen AI Hub
+## Example 2: Research Server with Perplexity AI
 
-Simple interface to Perplexity AI with citation support.
-"""
+Now let's build something more practical: a research tool powered by Perplexity AI through SAP Generative AI Hub.
 
-import json
-import requests
-import time
-from typing import Dict
+### Why wrap Perplexity instead of using it directly?
 
+You might wonder why not use Perplexity's native MCP server. Two reasons:
+1. **Educational value** - Great exercise to understand the full stack
+2. **Generative AI Hub integration** - The Hub exposes the API but not API keys. Perplexity's native MCP requires direct API keys, which isn't compatible with the Hub's proxy model where credentials stay on the server side.
 
+### Perplexity Client Implementation
+
+**File: `mcp_perplexity/perplexity.py`**
+
+This client handles:
+- Loading AI Core credentials from `ai_core_key.json`
+- OAuth token management with automatic refresh
+- Calling Perplexity's sonar model via Generative AI Hub
+- Formatting results with citations and related questions
+
+Here's the core implementation snippet showing the Gen AI Hub integration:
+
+```python
 class PerplexityClient:
     """Client for Perplexity API via SAP Gen AI Hub native proxy."""
 
@@ -85,69 +113,29 @@ class PerplexityClient:
         self.token = None
         self.token_expiry = 0
         self._refresh_token()
+
+        # IMPORTANT: Create a Gen AI Hub deployment for Perplexity's sonar-pro model
+        # Replace this with your own deployment ID from AI Core
+        # Best practice: Load from environment variable
+        import os
         self.deployment_id = os.environ.get("AI_CORE_DEPLOYMENT_ID", "your-deployment-id")
+
+        # Build API URL: Gen AI Hub base URL + deployment endpoint
         self.base_url = self.config['serviceurls']['AI_API_URL']
         self.api_url = f"{self.base_url}/v2/inference/deployments/{self.deployment_id}/chat/completions"
 
-    def _load_config(self, config_file: str) -> Dict:
-        """Load AI Core configuration from JSON file."""
-        with open(config_file) as f:
-            return json.load(f)
-
-    def _get_access_token(self) -> str:
-        """Get OAuth access token from AI Core."""
-        token_response = requests.post(
-            f"{self.config['url']}/oauth/token",
-            auth=(self.config['clientid'], self.config['clientsecret']),
-            data={'grant_type': 'client_credentials'},
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-        return token_response.json()['access_token']
-
-    def _refresh_token(self) -> None:
-        """Refresh the access token and set expiry time."""
-        token_response = requests.post(
-            f"{self.config['url']}/oauth/token",
-            auth=(self.config['clientid'], self.config['clientsecret']),
-            data={'grant_type': 'client_credentials'},
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-        token_data = token_response.json()
-        self.token = token_data['access_token']
-        # Set expiry time (default to 3600 seconds if not provided, subtract 60s buffer)
-        expires_in = token_data.get('expires_in', 3600)
-        self.token_expiry = time.time() + expires_in - 60
-
-    def _ensure_valid_token(self) -> None:
-        """Check if token is expired and refresh if needed."""
-        if time.time() >= self.token_expiry:
-            self._refresh_token()
-
     def research(self, query: str) -> str:
-        """
-        Research a query using Perplexity AI with real-time web search.
-
-        Args:
-            query: The research question
-
-        Returns:
-            Formatted response with answer and citations
-        """
-        # Ensure token is valid before making request
+        """Research a query using Perplexity AI with real-time web search."""
         self._ensure_valid_token()
 
-        # Build payload
         payload = {
             "model": "sonar-pro",
             "messages": [{"role": "user", "content": query}],
             "max_tokens": 5000,
             "temperature": 0.3,
-            "search_context_size": "low",
-            "return_citations": True,
-            "return_related_questions": True
+            "return_citations": True
         }
 
-        # Make request
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
@@ -155,56 +143,33 @@ class PerplexityClient:
         }
 
         response = requests.post(self.api_url, json=payload, headers=headers)
+        # ... format results with citations ...
+```
 
-        if response.status_code != 200:
-            return f"Error: {response.status_code} - {response.text}"
+The key is the URL structure: `{AI_API_URL}/v2/inference/deployments/{deployment_id}/chat/completions` — this routes through Gen AI Hub to Perplexity's native API while preserving citation metadata.
 
-        result = response.json()
+**AI Core Configuration File Structure:**
 
-        # Extract data
-        content = result['choices'][0]['message']['content'] if 'choices' in result else "No content"
-        citations = result.get('citations', [])
-        related = result.get('related_questions', [])
+Create `ai_core_key.json` with your Generative AI Hub service key:
 
-        # Format output
-        output = [
-            "=" * 80,
-            f"QUERY: {query}",
-            "=" * 80,
-            "",
-            content,
-            ""
-        ]
+```json
+{
+  "clientid": "your-client-id",
+  "clientsecret": "your-client-secret",
+  "url": "https://your-tenant.authentication.sap.hana.ondemand.com",
+  "serviceurls": {
+    "AI_API_URL": "https://api.ai.prod.eu-central-1.aws.ml.hana.ondemand.com"
+  }
+}
+```
 
-        if citations:
-            output.extend([
-                "=" * 80,
-                f"SOURCES ({len(citations)} citations)",
-                "=" * 80
-            ])
-            for i, url in enumerate(citations, 1):
-                output.append(f"[{i}] {url}")
-            output.append("")
+**Note**: You'll need to create a deployment in AI Core for the Perplexity model and update the `deployment_id` in the code with your own.
 
-        if related:
-            output.extend([
-                "=" * 80,
-                "RELATED QUESTIONS",
-                "=" * 80
-            ])
-            for q in related:
-                output.append(f"  • {q}")
+### MCP Server with Research Tool
 
-        return "\n".join(output)
+**File: `mcp_perplexity/server.py`**
 
-
-In the code we use the service key to access the Generative AI Hub - call the native perplexity api to create a completion for the sonar model. It is a model that enriches its results with web search. Because of that we can format the output nicely to include the references as well. 
-
-Note: I am not using the unified api from the orchestration module here - because we do not get the citations from that API yet.
-
-with that in place our server py now looks like this:
-
-
+```python
 from starlette.responses import JSONResponse
 from fastmcp import FastMCP
 import os
@@ -231,26 +196,39 @@ def research(query: str) -> str:
     return client.research(query)
 
 
-@mcp.custom_route("/health", methods=["GET"])
-async def health_check(request):
-    return JSONResponse({"status": "healthy", "service": "mcp-server"})
-
-
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+```
 
+Simple and clean — the MCP decorator handles all protocol complexity, and we just delegate the query to our Perplexity client.
 
-Basically we just invoke the Perplecity class to hand in the query of the user/agent.
+**Important**: We're using Generative AI Hub's native Perplexity proxy (not the orchestration module) because it preserves citation metadata that's crucial for research tasks.
 
+## Example 3: Adding IAS Authentication
 
-Now lets add a bit of complexity by looking at how to secure such a MCP server written in Python:
+For production use, we need to secure the MCP server. Let's add authentication using SAP Cloud Identity Services (IAS).
 
-The best option is to use the IAS service. In my previous blog I detailed out how to implement authentication checks in Python powered by the IAS service. Check this out for background information and specifically how to setup the configuration and client credentials on IAS side.
+### IAS Setup Prerequisites
 
-Preparation: There are a number of steps to setup the configuration on IAS side. Please refer to my other blog and complete all the steps in section "". You should end up with client credentials, a token service url.
+Before implementing authentication, complete these IAS configuration steps:
+1. Create an IAS application in your IAS tenant
+2. Configure OAuth 2.0 client credentials
+3. Add custom attribute `ias_apis` with value `api_read_access`
+4. Note your token URL, client ID, client secret, and audience
 
-For this case we modify our perplexity mcp server file to add a middleware:
+*For detailed IAS setup instructions, refer to my previous blog post on Python authentication with IAS.*
 
+### Secured MCP Server Implementation
+
+**File: `mcp_ias_auth/server.py`**
+
+The secured version adds an authentication middleware that:
+- Validates JWT tokens from IAS
+- Verifies token signature using JWKS (JSON Web Key Set)
+- Checks audience and issuer claims
+- Ensures required scope (`api_read_access`) is present
+
+```python
 from fastmcp import FastMCP
 from fastapi import FastAPI, Request
 import os
@@ -267,15 +245,17 @@ client = PerplexityClient()
 # Create MCP server
 mcp = FastMCP("Research Server")
 
-# Config - Load from environment variables
+# IAS Configuration - Replace with your values
 ISSUER = os.environ.get("IAS_ISSUER", "https://your-tenant.accounts.ondemand.com")
 JWKS_URL = f"{ISSUER}/oauth2/certs"
 AUDIENCE = os.environ.get("IAS_AUDIENCE", "your-client-id-here")
 
+
 class IASAuthMiddleware(BaseHTTPMiddleware):
+    """Middleware to validate IAS JWT tokens."""
 
     def get_public_key(self, token: str):
-        """Holt JWKS und findet den passenden Public Key"""
+        """Fetch JWKS and find matching public key for token validation."""
         kid = jwt.get_unverified_header(token)["kid"]
         jwks = requests.get(JWKS_URL).json()
 
@@ -283,25 +263,34 @@ class IASAuthMiddleware(BaseHTTPMiddleware):
             if key["kid"] == kid:
                 return jwt.algorithms.RSAAlgorithm.from_jwk(key)
 
-        raise Exception("No matching key found")
+        raise Exception("No matching key found in JWKS")
 
     def verify_token(self, token: str):
-        """Validiert JWT Token"""
+        """Validate JWT token signature and claims."""
         public_key = self.get_public_key(token)
-        payload = jwt.decode(token, public_key, algorithms=["RS256"],
-                            audience=AUDIENCE, issuer=ISSUER)
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience=AUDIENCE,
+            issuer=ISSUER
+        )
 
+        # Verify required scope
         if "api_read_access" not in payload.get("ias_apis", []):
             raise Exception("Missing required ias_apis scope")
 
         return payload
-    
+
     async def dispatch(self, request: Request, call_next):
-        # Check if authorization header exists
+        # Extract and validate authorization header
         auth_header = request.headers.get("Authorization")
 
         if not auth_header or not auth_header.startswith("Bearer "):
-            return JSONResponse(status_code=401, content={"detail": "Missing token"})
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing or invalid authorization header"}
+            )
 
         token = auth_header.split(" ")[1]
 
@@ -309,7 +298,10 @@ class IASAuthMiddleware(BaseHTTPMiddleware):
             payload = self.verify_token(token)
             request.state.user = payload
         except Exception as e:
-            return JSONResponse(status_code=401, content={"detail": str(e)})
+            return JSONResponse(
+                status_code=401,
+                content={"detail": f"Authentication failed: {str(e)}"}
+            )
 
         return await call_next(request)
 
@@ -320,17 +312,18 @@ def research(query: str) -> str:
     Research tool using Perplexity AI with real-time web search and citations.
 
     Args:
-        query: The research query (simple string input)
+        query: The research query
 
     Returns:
         Research results with answer and source citations
     """
     return client.research(query)
 
+
 # Create ASGI app from MCP server
 mcp_app = mcp.http_app(path='/mcp')
 
-# Key: Pass lifespan to FastAPI
+# Create FastAPI wrapper with lifespan management
 app = FastAPI(title="Researcher MCP", lifespan=mcp_app.lifespan)
 
 # Add IAS authentication middleware
@@ -339,63 +332,84 @@ mcp_app.add_middleware(IASAuthMiddleware)
 # Mount the MCP server
 app.mount("/", mcp_app)
 
-# Add health check endpoint
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+```
 
-The main changes: We added a middleware that takes care of checking the token. This ensures that the MCP server can only be utilized by authenticated clients. claude to add some details on the code here ###
+**What changed for authentication:**
 
-Note: Adding middleware in http servers is pretty straigt forward. For fast_mcp we need to host the mcp app via fast_
+The key difference from the unsecured version is the middleware layer. Since `fastmcp` is built on Starlette/FastAPI, we can leverage standard ASGI middleware patterns. The `IASAuthMiddleware` intercepts every request, validates the JWT token against IAS's public keys (JWKS), and checks required claims before allowing access to MCP endpoints.
 
-I recommend testing the setup locally and have therefore built a little test_mcp_client python script - that sends a few messages to the mcp server to validate wheter or not it is indeed authenticating and working in proper mcp manner.
+To integrate the middleware, we extract the ASGI app from `fastmcp` using `http_app()`, wrap it with FastAPI to manage lifespan properly, add our authentication middleware, and mount it. This pattern works seamlessly with Cloud Foundry's router.
 
-See some results like this
+### Testing Authentication
 
-## 1. Auth Rejection (without token)
+Test your secured endpoint:
 
+**1. Without token (should fail):**
+```bash
 curl "https://research-mcp-server-ias-auth.cfapps.sap.hana.ondemand.com/mcp"
+```
+Response: `401 - {"detail":"Missing or invalid authorization header"}`
 
-Response: 401 - {"detail":"Missing token"}
-
-## 2. Get Session (with token)
-
+**2. With valid token (should succeed):**
+```bash
 curl "https://research-mcp-server-ias-auth.cfapps.sap.hana.ondemand.com/mcp" \
   -H "Authorization: Bearer eyJqa3U..."
+```
+Response: `200 OK` with `mcp-session-id` header
 
-Response: 200 OK with mcp-session-id header
+Perfect! Our MCP server now requires valid IAS authentication.
 
-and indeed it works nicely.
+## Using the MCP Server in Joule Studio
 
-Now that we have the complete MCP Server - lets have a look at how we can utilize it in Joule Studio to extend an Agent:
+Now that we have a secured MCP server, let's integrate it with Joule Studio to build an AI agent with research capabilities.
 
-# Finally using the MCP Server from Joule Studio:
+### Step 1: Create a Destination
 
-Lets quickly see how we can utilize this new MCP Server directly within Joule Studio to build a little Researcher Agent. It should be able to reseach any information for now. But the background idea for sure is- that we use that MCP server in conjunction with other tools and proper use-cases:
+Navigate to your BTP Subaccount (where Joule Studio is running):
+1. Go to **Connectivity → Destinations**
+2. Create a new destination with these settings:
+   - **Name**: `research-mcp-server`
+   - **Type**: `HTTP`
+   - **URL**: `https://research-mcp-server-ias-auth.cfapps.sap.hana.ondemand.com`
+   - **Authentication**: `OAuth2ClientCredentials`
+   - **Client ID**: Your IAS client ID
+   - **Client Secret**: Your IAS client secret
+   - **Token Service URL**: `https://your-tenant.accounts.ondemand.com/oauth2/token`
 
-First we need to create a Destination for the MCP Server
+**Important**: Don't include `/mcp` in the URL — Joule Studio appends this automatically.
 
-This is done by Navigating to the BTP Subaccount Joule Studio is residing in and going to Connectivity > Destinations
+![Research MCP Destination Configuration](images/research%20mcp%20add.png)
 
-In here we specify our URL Note: Not ending with /mcp - because this will be attached later.
-And we can put in the client credentials
+### Step 2: Create Agent in Joule Studio
 
-![Research MCP Add](images/research%20mcp%20add.png)
+1. Create a new Agent in your Joule Extension Project
+2. Define the agent's expertise and instructions
+3. In the **MCP** section, click **Add MCP Server**
+4. Select your `research-mcp-server` destination
+5. Verify the `/mcp` path (default is fine)
+6. You'll see the available tools (in our case: `research`)
 
-Create Agent image
+![Research Agent Configuration](images/research%20agent.png)
 
-In the Joule extension Project we can create an Agent and provide it its expertise, and prompting. Most importantly the section MCP is where we add the new Research MCP Server. Here we are prompted to select a Destination - we use our researcher destination. Optionally we can also change the mcp path. In this case /mcp is fine and going ahead we see the tools available on that MCP Server.
+### Step 3: Test Your Agent
 
-![Research Agent](images/research%20agent.png)
+Start a conversation with your agent and ask it to research current information:
 
-Now lets test it in action - started the agent and asked him to resarch the current situation in the middle east and it works! Uptodate information directly in Joule - can now be combined with any business transactional data one might pull from a S4 system.
+> "Research the current situation in the Middle East"
 
-![Researcher Result](images/researcher%20result.png)
+The agent now has access to real-time web information via your MCP server!
 
-By the way check out my blog on connecting Joule Studio to on-premises HTTP APIs.
+![Researcher Agent Results](images/researcher%20result.png)
 
-In the Github I added all the different examples including the simple example, with auth based on IAS as well as based on XSUAA and the perplexity code. Hope you found this interesting. Leave a comment in case any doubts.
+This opens powerful possibilities: combine up-to-date web data with transactional business data from S/4HANA, SuccessFactors, or other SAP systems.
+
+## Using It in Action
+
+Now let's test it in action - I started the agent and asked it to research the current situation in the Middle East and it works! Up-to-date information directly in Joule - can now be combined with any business transactional data one might pull from an S/4HANA system.
+
+By the way, check out my blog on connecting Joule Studio to on-premises HTTP APIs to extend this pattern further.
+
+In the GitHub repository I've added all the different examples including the simple example, with auth based on IAS as well as based on XSUAA, and the Perplexity code. Hope you found this interesting. Leave a comment in case of any questions!
