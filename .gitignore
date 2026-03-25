@@ -2,6 +2,8 @@
 __pycache__/
 *.py[codz]
 *$py.class
+ai_core_key.json
+*.DS_Store
 
 # C extensions
 *.so

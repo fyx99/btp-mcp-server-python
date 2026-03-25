@@ -1,0 +1,7 @@
+---
+applications:
+- name: research-mcp-server-ias-auth
+  memory: 512M
+  disk_quota: 1024M
+  buildpack: python_buildpack
+  command: python server.py

@@ -1,0 +1,7 @@
+fastmcp
+fastapi
+uvicorn
+requests
+cfenv
+pyjwt
+sap-xssec

@@ -1,0 +1,9 @@
+---
+applications:
+- name: research-mcp-server-xsuaa-auth
+  memory: 1024M
+  disk_quota: 4024M
+  buildpack: python_buildpack
+  command: python server.py
+  services:
+  - xsuaa_mcp
